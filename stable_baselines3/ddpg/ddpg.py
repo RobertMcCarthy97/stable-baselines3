@@ -75,6 +75,7 @@ class DDPG(TD3):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        use_oracle_at_warmup=False,
     ):
         super().__init__(
             policy=policy,
@@ -96,6 +97,7 @@ class DDPG(TD3):
             device=device,
             seed=seed,
             optimize_memory_usage=optimize_memory_usage,
+            use_oracle_at_warmup=use_oracle_at_warmup,
             # Remove all tricks from TD3 to obtain DDPG:
             # we still need to specify target_policy_noise > 0 to avoid errors
             policy_delay=1,
