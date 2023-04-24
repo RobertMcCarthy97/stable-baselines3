@@ -93,6 +93,7 @@ class TD3(OffPolicyAlgorithm):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+        use_oracle_at_warmup=False,
     ):
         super().__init__(
             policy,
@@ -117,6 +118,7 @@ class TD3(OffPolicyAlgorithm):
             optimize_memory_usage=optimize_memory_usage,
             supported_action_spaces=(spaces.Box),
             support_multi_env=True,
+            use_oracle_at_warmup=use_oracle_at_warmup,
         )
 
         self.policy_delay = policy_delay

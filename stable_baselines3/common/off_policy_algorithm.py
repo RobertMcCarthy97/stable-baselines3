@@ -101,6 +101,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         use_sde_at_warmup: bool = False,
         sde_support: bool = True,
         supported_action_spaces: Optional[Tuple[spaces.Space, ...]] = None,
+        use_oracle_at_warmup: bool = False,
     ):
         super().__init__(
             policy=policy,
@@ -139,6 +140,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             self.policy_kwargs["use_sde"] = self.use_sde
         # For gSDE only
         self.use_sde_at_warmup = use_sde_at_warmup
+        self.use_oracle_at_warmup = use_oracle_at_warmup
 
     def _convert_train_freq(self) -> None:
         """
@@ -359,8 +361,11 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         """
         # Select action randomly or according to policy
         if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
-            # Warmup phase
-            unscaled_action = np.array([self.action_space.sample() for _ in range(n_envs)])
+            if self.use_oracle_at_warmup:
+                unscaled_action = self.predict_oracle(self._last_original_obs)
+            else:
+                # Warmup phase
+                unscaled_action = np.array([self.action_space.sample() for _ in range(n_envs)])
         else:
             # Note: when using continuous actions,
             # we assume that the policy uses tanh to scale the action
