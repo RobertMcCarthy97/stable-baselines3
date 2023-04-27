@@ -53,8 +53,16 @@ class LLMBasicReplayBuffer(ReplayBuffer):
         n_envs: int = 1,
         optimize_memory_usage: bool = False,
         handle_timeout_termination: bool = True,
+        # custom parameters:
+        keep_goals_same: bool = True,
+        do_parent_relabel: bool = False,
+        parent_relabel_p: float = 0.1,
     ):
         super(ReplayBuffer, self).__init__(buffer_size, observation_space, action_space, device, n_envs=n_envs)
+        
+        self.keep_goals_same = keep_goals_same
+        self.do_parent_relabel = do_parent_relabel
+        self.parent_relabel_p = parent_relabel_p
 
         assert isinstance(self.obs_shape, dict), "DictReplayBuffer must be used with Dict obs space only"
         self.buffer_size = max(buffer_size // n_envs, 1)
@@ -87,6 +95,12 @@ class LLMBasicReplayBuffer(ReplayBuffer):
         # see https://github.com/DLR-RM/stable-baselines3/issues/284
         self.handle_timeout_termination = handle_timeout_termination
         self.timeouts = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+        
+        # Handle parent goal info
+        if do_parent_relabel:
+            self.obs_parent_goals = np.zeros((self.buffer_size, self.n_envs, observation_space['desired_goal'].shape[0]), dtype=observation_space['desired_goal'].dtype)
+            self.parent_goal_rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+
 
         if psutil is not None:
             obs_nbytes = 0
@@ -140,7 +154,12 @@ class LLMBasicReplayBuffer(ReplayBuffer):
 
         if self.handle_timeout_termination:
             self.timeouts[self.pos] = np.array([info.get("TimeLimit.truncated", False) for info in infos])
-
+            
+        # record parent task info
+        if self.do_parent_relabel:
+            self.obs_parent_goals[self.pos] = np.array([info.get("obs_parent_goal", np.nan) for info in infos])
+            self.parent_goal_rewards[self.pos] = np.array([info.get("obs_parent_goal_reward", np.nan) for info in infos])
+            
         self.pos += 1
         if self.pos == self.buffer_size:
             self.full = True
@@ -166,21 +185,51 @@ class LLMBasicReplayBuffer(ReplayBuffer):
         batch_inds: np.ndarray,
         env: Optional[VecNormalize] = None,
     ) -> DictReplayBufferSamples:  # type: ignore[signature-mismatch] #FIXME:
+        '''
+        Testing:
+        - make sure buffer unchanged after sampling
+        - make sure relabelling correct
+        - make sure goals same
+        '''
         # Sample randomly the env idx
         env_indices = np.random.randint(0, high=self.n_envs, size=(len(batch_inds),))
 
-        # Normalize if needed and remove extra dimension (we are using only one env for now)
-        obs_ = self._normalize_obs({key: obs[batch_inds, env_indices, :] for key, obs in self.observations.items()}, env)
-        next_obs_ = self._normalize_obs(
-            {key: obs[batch_inds, env_indices, :] for key, obs in self.next_observations.items()}, env
-        )
+        # Obs: remove extra dimension (we are using only one env for now), copy as doing relabelling
+        obs_ = {key: obs[batch_inds, env_indices, :].copy() for key, obs in self.observations.items()}
+        next_obs_ = {key: obs[batch_inds, env_indices, :].copy() for key, obs in self.next_observations.items()}
         
-        # Set next_obs goal to be same as obs
-        next_obs_['desired_goal'] = obs_['desired_goal'].copy()
+        # Rewards
+        rewards_ = self.rewards[batch_inds, env_indices].copy() # (batch_size,)
+        
+        ###### Parent goal relabelling (custom) # TODO: move into own function?
+        if self.do_parent_relabel:
+            obs_parent_goals_ = self.obs_parent_goals[batch_inds, env_indices].copy()
+            parent_rewards_ = self.parent_goal_rewards[batch_inds, env_indices].copy()
+            # Relabel (only if the parent goal is not none)
+            # choose idxs
+            valid_idxs = np.where(~np.isnan(obs_parent_goals_[:, 0]))[0]
+            prob_indices = np.where(np.random.rand(len(valid_idxs)) <= self.parent_relabel_p)[0]
+            selected_idxs = valid_idxs[prob_indices]
+            # relabel
+            obs_['desired_goal'][selected_idxs] = obs_parent_goals_[selected_idxs]
+            next_obs_['desired_goal'][selected_idxs] = obs_parent_goals_[selected_idxs] # TODO: "Always using obs parent goal for next obs! (for now)"
+            rewards_[selected_idxs] = parent_rewards_[selected_idxs] # TODO: include child reward as a mini bonus?
+            assert np.all(~np.isnan(rewards_)) and np.all(~np.isnan(obs_['desired_goal'])), "NaNs in rewards or goals!"
+        
+        ####### Set next_obs goal to be same as obs (custom)
+        if self.keep_goals_same:
+            next_obs_['desired_goal'] = obs_['desired_goal'].copy()
+            
+        # Normalize obs if needed
+        obs_ = self._normalize_obs(obs_, env)
+        next_obs_ = self._normalize_obs(next_obs_, env)
 
-        # Convert to torch tensor
+        # Convert obs to torch tensor
         observations = {key: self.to_torch(obs) for key, obs in obs_.items()}
         next_observations = {key: self.to_torch(obs) for key, obs in next_obs_.items()}
+        
+        # Rewards process and to tensor
+        rewards = self.to_torch(self._normalize_reward(rewards_.reshape(-1, 1), env))
         
         # Only use dones that are not due to timeouts
         # deactivated by default (timeouts is initialized as an array of False)
@@ -194,5 +243,5 @@ class LLMBasicReplayBuffer(ReplayBuffer):
             actions=self.to_torch(self.actions[batch_inds, env_indices]),
             next_observations=next_observations,
             dones=dones,
-            rewards=self.to_torch(self._normalize_reward(self.rewards[batch_inds, env_indices].reshape(-1, 1), env)),
+            rewards=rewards,
         )
