@@ -158,7 +158,7 @@ class HumanOutputFormat(KVWriter, SeqWriter):
         no longer than 79 characters wide.
     """
 
-    def __init__(self, filename_or_file: Union[str, TextIO], max_length: int = 36):
+    def __init__(self, filename_or_file: Union[str, TextIO], max_length: int = 46):
         self.max_length = max_length
         if isinstance(filename_or_file, str):
             self.file = open(filename_or_file, "w")
