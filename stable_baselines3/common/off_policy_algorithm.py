@@ -492,6 +492,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         action_noise: Optional[ActionNoise] = None,
         learning_starts: int = 0,
         log_interval: Optional[int] = None,
+        reset_b4_collect: bool = False,
     ) -> RolloutReturn:
         """
         Collect experiences and store them into a ``ReplayBuffer``.
@@ -529,6 +530,9 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
         if self.use_sde:
             self.actor.reset_noise(env.num_envs)
+            
+        if reset_b4_collect:
+            self.rollout_reset()
 
         callback.on_rollout_start()
         continue_training = True
@@ -545,7 +549,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
 
             self.num_timesteps += env.num_envs
             num_collected_steps += 1
-
+            
             # Give access to local variables
             callback.update_locals(locals())
             # Only stop training if return value is False, not when it is None.
@@ -582,3 +586,10 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         callback.on_rollout_end()
 
         return RolloutReturn(num_collected_steps * env.num_envs, num_collected_episodes, continue_training)
+
+    def rollout_reset(self):
+        self._last_obs = self.env.reset()  # pytype: disable=annotation-type-mismatch
+        self._last_episode_starts = None # shouldn't need these in off-policy...
+        # Retrieve unnormalized observation for saving into the buffer
+        if self._vec_normalize_env is not None:
+            self._last_original_obs = self._vec_normalize_env.get_original_obs()
