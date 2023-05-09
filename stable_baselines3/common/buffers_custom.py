@@ -313,10 +313,8 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         self.handle_timeout_termination = handle_timeout_termination
         self.timeouts = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         
-        # relations
+        # datasharing
         self.child_p = child_p
-        self.has_parent = False
-        self.child_buffer_list = []
 
         if psutil is not None:
             total_memory_usage = self.observations.nbytes + self.actions.nbytes + self.rewards.nbytes + self.dones.nbytes
@@ -333,16 +331,33 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
                     f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
                 )
 
-    def init_parent(self):
-        ''' Custom '''
-        assert self.has_parent == False, "Can only have 1 parent"
-        self.has_parent = True
-        # note assumes only a single parent
-        self.parent_rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+    def init_datasharing(self, relations, all_models):
+        self.all_models = all_models
+        self.valid_relations = {'parents': {}, 'children': {}}
         
-    def add_child_buffer(self, child_buffer):
-        ''' Custom '''
-        self.child_buffer_list.append(child_buffer)
+        self.has_parent = False
+        # set parent reward tracking
+        if len(relations['parents']) > 0:
+            self.parent_rewards_dict = {}
+            for parent_name in relations['parents'].keys():
+                assert parent_name not in self.parent_rewards_dict
+                # check if the task is being trained
+                if parent_name in self.all_models.keys():
+                    # create reward storage
+                    self.parent_rewards_dict[parent_name] = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
+                    # record valid relation
+                    self.valid_relations['parents'][parent_name] = relations['parents'][parent_name]
+            if len(self.valid_relations['parents']) > 0:
+                self.has_parent = True
+                
+        self.has_children = False
+        # check for children
+        if len(relations['children']) > 0:
+            for child_name in relations['children'].keys():
+                if child_name in self.all_models.keys():
+                    self.valid_relations['children'][child_name] = relations['children'][child_name]
+            if len(self.valid_relations['children']) > 0:
+                self.has_children = True
         
     def set_task_name(self, task_name):
         ''' Custom '''
@@ -383,7 +398,8 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         
         # add parent rewards
         if self.has_parent:
-            self.parent_rewards[self.pos] = np.array([info['obs_parent_goal_reward'] for info in infos]) # TODO: make sure timestep correct on these rewards
+            for parent_name in self.valid_relations['parents'].keys():
+                self.parent_rewards_dict[parent_name][self.pos] = np.array([info[f'obs_{parent_name}_reward'] for info in infos]) # TODO: make sure timestep correct on these rewards
 
         if self.handle_timeout_termination:
             self.timeouts[self.pos] = np.array([info.get("TimeLimit.truncated", False) for info in infos])
@@ -432,9 +448,10 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         unnormed_data['rewards'] = self.rewards[batch_inds, env_indices].copy()
 
         # child data
-        if len(self.child_buffer_list) > 0 and self.child_p > 0:
+        if self.has_children and self.child_p > 0:
             # get child data
-            child_batch_size  = self.child_p * len(batch_inds) # TODO: Not actually taking a proportion here... 
+            child_p = self.calc_child_p()
+            child_batch_size  = child_p * len(batch_inds) # TODO: Not actually taking a proportion here... 
             data_dict_list = self._get_child_data(child_batch_size)
             # add child data to parent data
             for key in data_dict_list.keys():
@@ -443,14 +460,6 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
             # concat all together
             for key in data_dict_list.keys():
                 unnormed_data[key] = np.concatenate(data_dict_list[key], axis=0)
-                # TODO: check shapes
-                
-            # child_rewards = data_dict_list['rewards'][0]
-            # child_next_obs = data_dict_list['next_obs'][0]
-            # rewards_pos = child_rewards == 0
-            # state_pos = child_next_obs[:,5] > 0.4875
-            # if (not np.equal(rewards_pos, state_pos).all()) or (np.sum(state_pos) > 1):
-            #     import pdb; pdb.set_trace()
                 
         # assert all dones False
         assert np.sum(unnormed_data['dones']) == 0, "Some dones are True"
@@ -467,24 +476,42 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         )
         return ReplayBufferSamples(*tuple(map(self.to_torch, data)))
     
+    def calc_child_p(self):
+        # just use default value for now
+        # TODO
+        return self.child_p
+    
+    def get_child_batch_split(self, batch_size):
+        # just do even split for now
+        child_batch_size = int(batch_size // len(self.valid_relations['children']))
+        assert child_batch_size > 0
+        child_split = {}
+        for child_name in self.valid_relations['children'].keys():
+            # # TODO
+            # distance = self.relations['children'][child_name]
+            # success_rate = child_success_rate
+            # score = ((1- distance_scaled) + success_rate) / 2
+            child_split[child_name] = child_batch_size
+        return child_split
+        
     def _get_child_data(self, batch_size):
         ''' Custom '''
-        # just evenly split among children for now
-        n_children = len(self.child_buffer_list)
-        child_batch_size = int(batch_size // n_children) # TODO: check works
-        assert child_batch_size > 0
+        # decide split among children
+        child_split = self.get_child_batch_split(batch_size)
         # create dict to store data
         sampled_data = {}
         for key in ['obs', 'acts', 'next_obs', 'dones', 'rewards']:
             sampled_data[key] = []
         # get data for each child
-        for child_buffer in self.child_buffer_list:
-            child_data = child_buffer.sample_unnormed_for_parent(child_batch_size)
+        for child_name in self.valid_relations['children'].keys():
+            child_buffer = self.all_models[child_name].replay_buffer
+            child_batch_size = child_split[child_name]
+            child_data = child_buffer.sample_unnormed_for_parent(child_batch_size, self.task_name)
             for key in child_data.keys():
                 sampled_data[key].append(child_data[key])
         return sampled_data
     
-    def sample_unnormed_for_parent(self, batch_size: int, env: Optional[VecNormalize] = None):
+    def sample_unnormed_for_parent(self, batch_size: int, parent_name: str):
         ''' Custom '''
         assert not self.optimize_memory_usage, "Not implemented for memory efficient variant"
         assert self.has_parent
@@ -493,11 +520,12 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         batch_inds = np.random.randint(0, upper_bound, size=batch_size)
         # Sample randomly the env idx
         env_indices = np.random.randint(0, high=self.n_envs, size=(len(batch_inds),))
+        # TODO: sample using PER, or based on trajectory success rates...
         # return unnormed data
         return {
             'obs': self.observations[batch_inds, env_indices, :].copy(),
             'acts': self.actions[batch_inds, env_indices, :].copy(),
             'next_obs': self.next_observations[batch_inds, env_indices, :].copy(),
             'dones': (self.dones[batch_inds, env_indices].copy() * (1 - self.timeouts[batch_inds, env_indices].copy())),
-            'rewards': self.parent_rewards[batch_inds, env_indices].copy()
+            'rewards': self.parent_rewards_dict[parent_name][batch_inds, env_indices].copy()
         }
