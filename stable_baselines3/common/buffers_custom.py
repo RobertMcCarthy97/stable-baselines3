@@ -476,24 +476,71 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         )
         return ReplayBufferSamples(*tuple(map(self.to_torch, data)))
     
-    def calc_child_p(self):
+    def calc_child_p(self, min_p=0.05, max_p=0.5, child_p_strat='default'):
         # just use default value for now
         # TODO
-        return self.child_p
+        if child_p_strat == 'default':
+            child_p = self.child_p
+        elif child_p_strat == 'self_success':
+            self_success = self._get_task_success_rate(self.task_name)
+            child_p = max(min_p, max_p * (1 - self_success))
+            assert False, "check works properly"
+        elif child_p_strat == 'all_task_success':
+            self_success = self._get_task_success_rate(self.task_name)
+            children_successes = []
+            for child in self.valid_relations['children'].keys():
+                children_successes.append(self._get_task_success_rate(child))
+            children_success = np.mean(children_successes)
+            p = ((1 - self_success) + (children_success/2)) / 1.5
+            child_p = max(min_p, max_p * p)
+            assert False, "check works, make more sophisticated"
+        else:
+            raise NotImplementedError(f"{child_p_strat} not implemented for calc_child_p()")
+        assert child_p >= min_p and child_p <= max_p
+        return child_p
+            
     
-    def get_child_batch_split(self, batch_size):
+    def get_child_batch_split(self, batch_size, split_strat='even'):
         # just do even split for now
-        child_batch_size = int(batch_size // len(self.valid_relations['children']))
-        assert child_batch_size > 0
         child_split = {}
-        for child_name in self.valid_relations['children'].keys():
-            # # TODO
-            # distance = self.relations['children'][child_name]
-            # success_rate = child_success_rate
-            # score = ((1- distance_scaled) + success_rate) / 2
-            child_split[child_name] = child_batch_size
+        if split_strat == 'even':
+            child_batch_size = int(batch_size // len(self.valid_relations['children']))
+            assert child_batch_size > 0
+            for child_name in self.valid_relations['children'].keys():
+                child_split[child_name] = child_batch_size
+        
+        elif split_strat == 'success_based':
+            score_sum = 0
+            for child_name in self.valid_relations['children'].keys():
+                score = self._get_task_success_rate(child_name)
+                score_sum += score
+            for child_name in self.valid_relations['children'].keys():
+                score = self._get_task_success_rate(child_name)
+                child_split[child_name] = int(batch_size * score / score_sum)
+            assert False
+        
+        elif split_strat == 'success_distance_based':
+            score_sum = 0
+            child_scores = {}
+            for child_name in self.valid_relations['children'].keys():
+                distance = self.valid_relations['children'][child_name]
+                assert distance >= 1
+                distance_score = 1 / distance
+                success_rate = self._get_task_success_rate(child_name)
+                score = (distance_score + success_rate) / 2
+                child_scores[child_name] = score
+                score_sum += score
+            for child_name in child_scores.keys():
+                child_split[child_name] = int(batch_size * child_scores[child_name] / score_sum)
+            assert False
+        
+        else:
+            raise NotImplementedError(f"{split_strat} not implemented for get_child_batch_split()")
         return child_split
         
+    def _get_task_success_rate(self, task_name):
+        return self.env.agent_conductor.get_task_epoch_success_rate(task_name) # TODO: use ema or this???
+    
     def _get_child_data(self, batch_size):
         ''' Custom '''
         # decide split among children
