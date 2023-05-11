@@ -373,7 +373,7 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         infos: List[Dict[str, Any]],
     ) -> None:
         
-        assert all([info['active_task_name'] == self.task_name for info in infos]), "Task name mismatch"
+        assert all([info['prev_task_name'] == self.task_name for info in infos]), "Task name mismatch"
         
         # Reshape needed when using multiple envs with discrete observations
         # as numpy cannot broadcast (n_discrete,) to (n_discrete, 1)
