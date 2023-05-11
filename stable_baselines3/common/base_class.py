@@ -535,7 +535,10 @@ class BaseAlgorithm(ABC):
         return self.policy.predict(observation, state, episode_start, deterministic)
     
     def predict_oracle(self, obs):
-        actions = np.array([self.env.envs[0].get_oracle_action(obs['observation'][i]) for i in range(self.n_envs)])
+        if isinstance(obs, dict):
+            actions = np.array([self.env.envs[0].get_oracle_action(obs['observation'][i]) for i in range(self.n_envs)])
+        else:
+            actions = np.array([self.env.envs[0].get_oracle_action(obs[i]) for i in range(self.n_envs)])
         return actions
 
     def set_random_seed(self, seed: Optional[int] = None) -> None:
