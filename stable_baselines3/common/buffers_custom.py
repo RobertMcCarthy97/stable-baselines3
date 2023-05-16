@@ -5,6 +5,7 @@ from typing import Any, Dict, Generator, List, Optional, Union
 import numpy as np
 import torch as th
 from gym import spaces
+import math
 
 from stable_baselines3.common.preprocessing import get_action_dim, get_obs_shape
 from stable_baselines3.common.type_aliases import (
@@ -331,7 +332,7 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
                     f"replay buffer {total_memory_usage:.2f}GB > {mem_available:.2f}GB"
                 )
 
-    def init_datasharing(self, relations, all_models):
+    def init_datasharing(self, relations, all_models, agent_conductor):
         self.all_models = all_models
         self.valid_relations = {'parents': {}, 'children': {}}
         
@@ -358,6 +359,10 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
                     self.valid_relations['children'][child_name] = relations['children'][child_name]
             if len(self.valid_relations['children']) > 0:
                 self.has_children = True
+                
+        # get task proportions
+        task = agent_conductor.get_task_from_name(self.task_name)
+        self.child_proportions = task.get_child_proportions()
         
     def set_task_name(self, task_name):
         ''' Custom '''
@@ -481,10 +486,12 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         # TODO
         if child_p_strat == 'default':
             child_p = self.child_p
+            
         elif child_p_strat == 'self_success':
             self_success = self._get_task_success_rate(self.task_name)
             child_p = max(min_p, max_p * (1 - self_success))
             assert False, "check works properly"
+            
         elif child_p_strat == 'all_task_success':
             self_success = self._get_task_success_rate(self.task_name)
             children_successes = []
@@ -494,48 +501,43 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
             p = ((1 - self_success) + (children_success/2)) / 1.5
             child_p = max(min_p, max_p * p)
             assert False, "check works, make more sophisticated"
+            
         else:
             raise NotImplementedError(f"{child_p_strat} not implemented for calc_child_p()")
+        
         assert child_p >= min_p and child_p <= max_p
         return child_p
             
     
     def get_child_batch_split(self, batch_size, split_strat='even'):
+        # # success rates
+        # child_success_rates = {}
+        # for child_name in self.valid_relations['children'].keys():
+        #     child_success_rates[child_name] = self._get_task_success_rate(child_name)
+        # # data sizes
+        # child_data_sizes = {}
+        # for child_name in self.valid_relations['children'].keys():
+        #     child_data_sizes[child_name] = self.all_models[child_name].replay_buffer.size()
+        # # % of task
+        # child_task_proportions = self.child_proportions
+        # # distance from parent
+        # child_distance_from_parent = {}
+        # for child_name in self.valid_relations['children'].keys():
+        #     child_distance_from_parent[child_name] = self.valid_relations['children'][child_name]
+        # assert False, "figure out what is simplest and best to use..."
+        
         # just do even split for now
         child_split = {}
+        
         if split_strat == 'even':
-            child_batch_size = int(batch_size // len(self.valid_relations['children']))
+            child_batch_size = math.ceil(batch_size // len(self.valid_relations['children'])) # round up to boost batch size
             assert child_batch_size > 0
             for child_name in self.valid_relations['children'].keys():
                 child_split[child_name] = child_batch_size
         
-        elif split_strat == 'success_based':
-            score_sum = 0
-            for child_name in self.valid_relations['children'].keys():
-                score = self._get_task_success_rate(child_name)
-                score_sum += score
-            for child_name in self.valid_relations['children'].keys():
-                score = self._get_task_success_rate(child_name)
-                child_split[child_name] = int(batch_size * score / score_sum)
-            assert False
-        
-        elif split_strat == 'success_distance_based':
-            score_sum = 0
-            child_scores = {}
-            for child_name in self.valid_relations['children'].keys():
-                distance = self.valid_relations['children'][child_name]
-                assert distance >= 1
-                distance_score = 1 / distance
-                success_rate = self._get_task_success_rate(child_name)
-                score = (distance_score + success_rate) / 2
-                child_scores[child_name] = score
-                score_sum += score
-            for child_name in child_scores.keys():
-                child_split[child_name] = int(batch_size * child_scores[child_name] / score_sum)
-            assert False
-        
         else:
             raise NotImplementedError(f"{split_strat} not implemented for get_child_batch_split()")
+        
         return child_split
         
     def _get_task_success_rate(self, task_name):
@@ -553,9 +555,13 @@ class SeparatePoliciesReplayBuffer(BaseBuffer):
         for child_name in self.valid_relations['children'].keys():
             child_buffer = self.all_models[child_name].replay_buffer
             child_batch_size = child_split[child_name]
-            child_data = child_buffer.sample_unnormed_for_parent(child_batch_size, self.task_name)
-            for key in child_data.keys():
-                sampled_data[key].append(child_data[key])
+            child_upper_bound = child_buffer.buffer_size if child_buffer.full else child_buffer.pos
+            if child_upper_bound > child_batch_size:
+                # TODO: only keep sampling if child data buffer is growing in size?? (otherwize overfit to small data?)
+                child_data = child_buffer.sample_unnormed_for_parent(child_batch_size, self.task_name)
+                for key in child_data.keys():
+                    sampled_data[key].append(child_data[key])
+        assert len(sampled_data['obs']) > 0
         return sampled_data
     
     def sample_unnormed_for_parent(self, batch_size: int, parent_name: str):
