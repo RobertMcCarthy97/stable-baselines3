@@ -120,6 +120,8 @@ class TD3Policy(BasePolicy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
+        # custom
+        goal_based_custom_args: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
             observation_space,
@@ -157,6 +159,7 @@ class TD3Policy(BasePolicy):
                 "n_critics": n_critics,
                 "net_arch": critic_arch,
                 "share_features_extractor": share_features_extractor,
+                "goal_based_custom_args": goal_based_custom_args,
             }
         )
 

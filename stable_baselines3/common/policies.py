@@ -911,6 +911,7 @@ class ContinuousCritic(BaseModel):
         normalize_images: bool = True,
         n_critics: int = 2,
         share_features_extractor: bool = True,
+        goal_based_custom_args: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
             observation_space,
@@ -918,6 +919,17 @@ class ContinuousCritic(BaseModel):
             features_extractor=features_extractor,
             normalize_images=normalize_images,
         )
+        
+        if goal_based_custom_args is not None:
+            assert goal_based_custom_args['use_siren'] or goal_based_custom_args['use_sigmoid']
+            self.use_siren = goal_based_custom_args['use_siren']
+            self.use_sigmoid = goal_based_custom_args['use_sigmoid']
+            self.max_q = goal_based_custom_args['max_q']
+            self.min_q = goal_based_custom_args['min_q']
+            self.q_range = self.max_q - self.min_q
+        else:
+            self.use_siren = False
+            self.use_sigmoid = False
 
         action_dim = get_action_dim(self.action_space)
 
@@ -925,7 +937,7 @@ class ContinuousCritic(BaseModel):
         self.n_critics = n_critics
         self.q_networks = []
         for idx in range(n_critics):
-            q_net = create_mlp(features_dim + action_dim, 1, net_arch, activation_fn)
+            q_net = create_mlp(features_dim + action_dim, 1, net_arch, activation_fn, use_siren=self.use_siren)
             q_net = nn.Sequential(*q_net)
             self.add_module(f"qf{idx}", q_net)
             self.q_networks.append(q_net)
@@ -936,7 +948,11 @@ class ContinuousCritic(BaseModel):
         with th.set_grad_enabled(not self.share_features_extractor):
             features = self.extract_features(obs, self.features_extractor)
         qvalue_input = th.cat([features, actions], dim=1)
-        return tuple(q_net(qvalue_input) for q_net in self.q_networks)
+        
+        if self.use_sigmoid:
+            return tuple(self.q_range * th.sigmoid(q_net(qvalue_input)) + self.min_q for q_net in self.q_networks)
+        else:
+            return tuple(q_net(qvalue_input) for q_net in self.q_networks)
 
     def q1_forward(self, obs: th.Tensor, actions: th.Tensor) -> th.Tensor:
         """
@@ -946,4 +962,9 @@ class ContinuousCritic(BaseModel):
         """
         with th.no_grad():
             features = self.extract_features(obs, self.features_extractor)
-        return self.q_networks[0](th.cat([features, actions], dim=1))
+            
+        if self.use_sigmoid:
+            net_out = self.q_networks[0](th.cat([features, actions], dim=1))
+            return self.q_range * th.sigmoid(net_out) + self.min_q
+        else:
+            return self.q_networks[0](th.cat([features, actions], dim=1))

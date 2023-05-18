@@ -193,6 +193,14 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 **replay_buffer_kwargs,  # pytype:disable=wrong-keyword-args
             )
 
+        if "goal_based_custom_args" in self.policy_kwargs.keys() and self.policy_kwargs["goal_based_custom_args"] is not None:
+            assert 'use_siren' in self.policy_kwargs["goal_based_custom_args"].keys()
+            assert 'use_sigmoid' in self.policy_kwargs["goal_based_custom_args"].keys()
+            assert len(self.policy_kwargs["goal_based_custom_args"].keys()) == 2
+            self.policy_kwargs["goal_based_custom_args"]["max_q"] = 0.0
+            self.policy_kwargs["goal_based_custom_args"]["min_q"] = -1.0 / (1 - self.gamma)
+            # TODO: assert rewards match this? (assuming max is 0 and min is -1)
+            
         self.policy = self.policy_class(  # pytype:disable=not-instantiable
             self.observation_space,
             self.action_space,

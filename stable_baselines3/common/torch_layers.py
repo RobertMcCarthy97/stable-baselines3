@@ -109,6 +109,7 @@ def create_mlp(
     activation_fn: Type[nn.Module] = nn.ReLU,
     squash_output: bool = False,
     with_bias: bool = True,
+    use_siren: bool = False,
 ) -> List[nn.Module]:
     """
     Create a multi layer perceptron (MLP), which is
@@ -126,9 +127,14 @@ def create_mlp(
     :param with_bias: If set to False, the layers will not learn an additive bias
     :return:
     """
-
+    
     if len(net_arch) > 0:
-        modules = [nn.Linear(input_dim, net_arch[0], bias=with_bias), activation_fn()]
+        if use_siren:
+            assert not squash_output, "may be using sigmoid output later..."
+            from siren_pytorch import Siren
+            modules = [Siren(input_dim, net_arch[0], c=6, w0=30.)]
+        else:
+            modules = [nn.Linear(input_dim, net_arch[0], bias=with_bias), activation_fn()]
     else:
         modules = []
 
