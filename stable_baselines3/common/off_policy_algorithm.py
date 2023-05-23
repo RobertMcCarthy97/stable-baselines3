@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import numpy as np
+import math
 import torch as th
 from gym import spaces
 
@@ -328,9 +329,15 @@ class OffPolicyAlgorithm(BaseAlgorithm):
                 break
 
             if self.num_timesteps > 0 and self.num_timesteps > self.learning_starts:
-                # If no `gradient_steps` is specified,
-                # do as many gradients steps as steps performed during the rollout
-                gradient_steps = self.gradient_steps if self.gradient_steps >= 0 else rollout.episode_timesteps
+                if isinstance(self.gradient_steps, float):
+                    assert self.gradient_steps > 0 and self.gradient_steps < 1
+                    assert rollout.episode_timesteps == 50
+                    gradient_steps = math.ceil(self.gradient_steps * rollout.episode_timesteps)
+                else:
+                    assert self.gradient_steps == -1
+                    # If no `gradient_steps` is specified,
+                    # do as many gradients steps as steps performed during the rollout
+                    gradient_steps = self.gradient_steps if self.gradient_steps >= 0 else rollout.episode_timesteps
                 # Special case when the user passes `gradient_steps=0`
                 if gradient_steps > 0:
                     self.train(batch_size=self.batch_size, gradient_steps=gradient_steps)
