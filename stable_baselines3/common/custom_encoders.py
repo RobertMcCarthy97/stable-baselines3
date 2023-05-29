@@ -4,85 +4,14 @@ import gym
 import torch as th
 from gym import spaces
 from torch import nn
+import torch
 
 from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
 from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.utils import get_device
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, create_mlp
-
-'''
-class TaskEncoder(base_component.Component):
-    def __init__(
-        self,
-        pretrained_embedding_cfg: ConfigType,
-        num_embeddings: int,
-        embedding_dim: int,
-        hidden_dim: int,
-        num_layers: int,
-        output_dim: int,
-    ):
-        """Encode the task into a vector.
-
-        Args:
-            pretrained_embedding_cfg (ConfigType): config for using pretrained
-                embeddings.
-            num_embeddings (int): number of elements in the embedding table. This is
-                used if pretrained embedding is not used.
-            embedding_dim (int): dimension for the embedding. This is
-                used if pretrained embedding is not used.
-            hidden_dim (int): dimension of the hidden layer of the trunk.
-            num_layers (int): number of layers in the trunk.
-            output_dim (int): output dimension of the task encoder.
-        """
-        super().__init__()
-        if pretrained_embedding_cfg.should_use:
-            with open(pretrained_embedding_cfg.path_to_load_from) as f:
-                metadata = json.load(f)
-            ordered_task_list = pretrained_embedding_cfg.ordered_task_list
-            pretrained_embedding = torch.Tensor(
-                [metadata[task] for task in ordered_task_list]
-            )
-            assert num_embeddings == pretrained_embedding.shape[0]
-            pretrained_embedding_dim = pretrained_embedding.shape[1]
-            pretrained_embedding = nn.Embedding.from_pretrained(
-                embeddings=pretrained_embedding,
-                freeze=True,
-            )
-            projection_layer = nn.Sequential(
-                nn.Linear(
-                    in_features=pretrained_embedding_dim, out_features=2 * embedding_dim
-                ),
-                nn.ReLU(),
-                nn.Linear(in_features=2 * embedding_dim, out_features=embedding_dim),
-                nn.ReLU(),
-            )
-            projection_layer.apply(agent_utils.weight_init)
-            self.embedding = nn.Sequential(  # type: ignore [call-overload]
-                pretrained_embedding,
-                nn.ReLU(),
-                projection_layer,
-            )
-
-        else:
-            self.embedding = nn.Sequential(
-                nn.Embedding(
-                    num_embeddings=num_embeddings, embedding_dim=embedding_dim
-                ),
-                nn.ReLU(),
-            )
-            self.embedding.apply(agent_utils.weight_init)
-        self.trunk = agent_utils.build_mlp(
-            input_dim=embedding_dim,
-            hidden_dim=hidden_dim,
-            output_dim=output_dim,
-            num_layers=num_layers,
-        )
-        self.trunk.apply(agent_utils.weight_init)
-
-    def forward(self, env_index: TensorType) -> TensorType:
-        return self.trunk(self.embedding(env_index))
-'''
+  
 
 class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
     """
@@ -156,45 +85,130 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
             assert False
 
 
-class FiLM(FeedForwardEncoder):
+class FiLM(BaseFeaturesExtractor):
+    '''
+    # TODO: other papers pass the language representation through a weight and bias layer...
+    - https://github.com/mila-iqia/babyai/blob/65fb0cb6f816532a65014bf034a758244e2d5ae7/babyai/model.py#L20
+    - https://github.com/CraftJarvis/MC-Controller/blob/68b5a9d08036301c731157e1d5f6a6f25138dd3e/src/utils/foundation.py#L65
+
+    # TODO: ensure use same params as mtrl.
+
+    '''
     def __init__(
         self,
-        env_obs_shape: List[int],
-        multitask_cfg: ConfigType,
-        feature_dim: int,
-        num_layers: int,
-        hidden_dim: int,
-        should_tie_encoders: bool,
+        # env_obs_shape: List[int],
+        observation_space: spaces.Dict,
+        feature_dim: int = 50,
+        num_layers = 1,
+        concat_task_encoding: bool = False,
+        # num_layers: int,
+        # hidden_dim: int,
+        # should_tie_encoders: bool,
     ):
-        super().__init__(
-            env_obs_shape=env_obs_shape,
-            multitask_cfg=multitask_cfg,
-            feature_dim=feature_dim,
-            num_layers=num_layers,
-            hidden_dim=hidden_dim,
-            should_tie_encoders=should_tie_encoders,
-        )
+        # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
+        super().__init__(observation_space, features_dim=1)
+    
+        self.concat_task_encoding = concat_task_encoding
 
-        # overriding the type from base class.
-        self.trunk: List[ModelType] = agent_utils.build_mlp_as_module_list(  # type: ignore[assignment]
-            input_dim=env_obs_shape[0],
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            output_dim=feature_dim,
-        )
+        # Task encoder
+        task_dim = observation_space['desired_goal'].shape[0]
+        n_gammas_betas = 2 * (num_layers + 1)
+        self.film_task_encoder = nn.Sequential(*create_mlp(input_dim=task_dim, output_dim=n_gammas_betas, net_arch=[50]))
 
-    def forward(self, mtobs: MTObs, detach: bool = False):
-        env_obs = mtobs.env_obs
-        task_encoding: TensorType = cast(TensorType, mtobs.task_info.encoding)  # type: ignore[union-attr]
+        # Obs encoder
+        obs_dim = observation_space['observation'].shape[0]
+        self.trunk = build_mlp_as_module_list(input_dim=obs_dim, hidden_dim=50, output_dim=feature_dim, num_layers=num_layers)
+        # TODO: should there be a relu on output of this trunk also??
+        assert len(self.trunk) == num_layers + 1
+
+        if concat_task_encoding:
+            raise NotImplementedError
+        self._features_dim = feature_dim
+
+    def forward(self, observations: TensorDict, detach: bool = False) -> th.Tensor:
+        import pdb; pdb.set_trace()
+        env_obs = observations['observation']
+
+        task_encoding = self.film_task_encoder(observations['desired_goal'])
+        # TODO: detach task_encoding??
+
         # mypy raises a false alarm. mtobs.task if already checked to be not None.
         gammas_and_betas: List[TensorType] = torch.split(
             task_encoding.unsqueeze(2), split_size_or_sections=2, dim=1
         )
-        # assert len(gammas_and_betas) == len(self.trunk)
+        assert len(gammas_and_betas) == len(self.trunk)
+
         h = env_obs
         for layer, gamma_beta in zip(self.trunk, gammas_and_betas):
             h = layer(h) * gamma_beta[:, 0] + gamma_beta[:, 1]
+        
         if detach:
-            h = h.detach()
+            h = h.detach() # TODO: check in mtrl where should detach, implement as same...
+        
+        if self.concat_task_encoding:
+            h = torch.cat([h, task_encoding], dim=1)
+            assert False, "check concat correct"
+            # TODO: check whether to also return task_encoding...
+        
+        assert h.shape[1] == self._features_dim
 
         return h
+    
+
+
+def _get_list_of_layers(
+    input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
+) -> List[nn.Module]:
+    """Utility function to get a list of layers. This assumes all the hidden
+    layers are using the same dimensionality.
+
+    Args:
+        input_dim (int): input dimension.
+        hidden_dim (int): dimension of the hidden layers.
+        output_dim (int): dimension of the output layer.
+        num_layers (int): number of layers in the mlp.
+
+    Returns:
+        ModelType: [description]
+    """
+    mods: List[nn.Module]
+    if num_layers == 0:
+        mods = [nn.Linear(input_dim, output_dim)]
+    else:
+        mods = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
+        for _ in range(num_layers - 1):
+            mods += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU()]
+        mods.append(nn.Linear(hidden_dim, output_dim))
+    return mods
+
+def build_mlp_as_module_list(
+    input_dim: int, hidden_dim: int, output_dim: int, num_layers: int
+):
+    """Utility function to build a module list of layers. This assumes all
+    the hidden layers are using the same dimensionality.
+
+    Args:
+        input_dim (int): input dimension.
+        hidden_dim (int): dimension of the hidden layers.
+        output_dim (int): dimension of the output layer.
+        num_layers (int): number of layers in the mlp.
+
+    Returns:
+        ModelType: [description]
+    """
+    mods: List[nn.Module] = _get_list_of_layers(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
+        num_layers=num_layers,
+    )
+    sequential_layers = []
+    new_layer = []
+    for index, current_layer in enumerate(mods):
+        if index % 2 == 0:
+            new_layer = [current_layer]
+        else:
+            new_layer.append(current_layer)
+            sequential_layers.append(nn.Sequential(*new_layer))
+    sequential_layers.append(nn.Sequential(*new_layer))
+    return nn.ModuleList(sequential_layers)
