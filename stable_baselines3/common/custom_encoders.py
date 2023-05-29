@@ -35,6 +35,8 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
         cnn_output_dim: int = 256,
         normalized_image: bool = False,
         encoders = {'observation': 'flatten', 'desired_goal': 'flatten'},
+        mlp_out_dim: int = 50,
+        mlp_net_arch: List[int] = [50],
         fuse_method: str = 'concat',
     ) -> None:
         # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
@@ -55,8 +57,8 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
                 total_concat_size += in_dim
                 
             elif encoders[key] == 'mlp':
-                extractors[key] = nn.Sequential(*create_mlp(input_dim=in_dim, output_dim=50, net_arch=[50])) # TODO: device, check size correct
-                total_concat_size += 50
+                extractors[key] = nn.Sequential(*create_mlp(input_dim=in_dim, output_dim=mlp_out_dim, net_arch=mlp_net_arch)) # TODO: device, check size correct
+                total_concat_size += mlp_out_dim
                 print("no activation on output layer...")
 
             elif encoders[key] == 'task_enc':
@@ -99,8 +101,10 @@ class FiLM(BaseFeaturesExtractor):
         # env_obs_shape: List[int],
         observation_space: spaces.Dict,
         feature_dim: int = 50,
+        hidden_dim: int = 50,
         num_layers = 1,
         concat_task_encoding: bool = False,
+        task_encoder_arch = [50],
         # num_layers: int,
         # hidden_dim: int,
         # should_tie_encoders: bool,
@@ -113,11 +117,11 @@ class FiLM(BaseFeaturesExtractor):
         # Task encoder
         task_dim = observation_space['desired_goal'].shape[0]
         n_gammas_betas = 2 * (num_layers + 1)
-        self.film_task_encoder = nn.Sequential(*create_mlp(input_dim=task_dim, output_dim=n_gammas_betas, net_arch=[50]))
+        self.film_task_encoder = nn.Sequential(*create_mlp(input_dim=task_dim, output_dim=n_gammas_betas, net_arch=task_encoder_arch))
 
         # Obs encoder
         obs_dim = observation_space['observation'].shape[0]
-        self.trunk = build_mlp_as_module_list(input_dim=obs_dim, hidden_dim=50, output_dim=feature_dim, num_layers=num_layers)
+        self.trunk = build_mlp_as_module_list(input_dim=obs_dim, hidden_dim=hidden_dim, output_dim=feature_dim, num_layers=num_layers)
         # TODO: should there be a relu on output of this trunk also??
         assert len(self.trunk) == num_layers + 1
 
@@ -126,7 +130,6 @@ class FiLM(BaseFeaturesExtractor):
         self._features_dim = feature_dim
 
     def forward(self, observations: TensorDict, detach: bool = False) -> th.Tensor:
-        import pdb; pdb.set_trace()
         env_obs = observations['observation']
 
         task_encoding = self.film_task_encoder(observations['desired_goal'])
