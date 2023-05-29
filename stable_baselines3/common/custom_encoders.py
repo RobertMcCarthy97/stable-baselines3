@@ -154,3 +154,47 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
             return th.cat(encoded_tensor_list, dim=1)
         else:
             assert False
+
+
+class FiLM(FeedForwardEncoder):
+    def __init__(
+        self,
+        env_obs_shape: List[int],
+        multitask_cfg: ConfigType,
+        feature_dim: int,
+        num_layers: int,
+        hidden_dim: int,
+        should_tie_encoders: bool,
+    ):
+        super().__init__(
+            env_obs_shape=env_obs_shape,
+            multitask_cfg=multitask_cfg,
+            feature_dim=feature_dim,
+            num_layers=num_layers,
+            hidden_dim=hidden_dim,
+            should_tie_encoders=should_tie_encoders,
+        )
+
+        # overriding the type from base class.
+        self.trunk: List[ModelType] = agent_utils.build_mlp_as_module_list(  # type: ignore[assignment]
+            input_dim=env_obs_shape[0],
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            output_dim=feature_dim,
+        )
+
+    def forward(self, mtobs: MTObs, detach: bool = False):
+        env_obs = mtobs.env_obs
+        task_encoding: TensorType = cast(TensorType, mtobs.task_info.encoding)  # type: ignore[union-attr]
+        # mypy raises a false alarm. mtobs.task if already checked to be not None.
+        gammas_and_betas: List[TensorType] = torch.split(
+            task_encoding.unsqueeze(2), split_size_or_sections=2, dim=1
+        )
+        # assert len(gammas_and_betas) == len(self.trunk)
+        h = env_obs
+        for layer, gamma_beta in zip(self.trunk, gammas_and_betas):
+            h = layer(h) * gamma_beta[:, 0] + gamma_beta[:, 1]
+        if detach:
+            h = h.detach()
+
+        return h
