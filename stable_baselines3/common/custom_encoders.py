@@ -11,7 +11,65 @@ from stable_baselines3.common.type_aliases import TensorDict
 from stable_baselines3.common.utils import get_device
 
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, create_mlp
-  
+
+ModelType = torch.nn.Module
+TensorType = torch.Tensor
+
+####################################################################################################
+
+# TODO: use these inits more??
+
+def weight_init_linear(m: ModelType):
+    assert isinstance(m.weight, TensorType)
+    nn.init.xavier_uniform_(m.weight)
+    assert isinstance(m.bias, TensorType)
+    nn.init.zeros_(m.bias)
+
+
+def weight_init_conv(m: ModelType):
+    assert False
+    # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
+    assert isinstance(m.weight, TensorType)
+    assert m.weight.size(2) == m.weight.size(3)
+    m.weight.data.fill_(0.0)
+    if hasattr(m.bias, "data"):
+        m.bias.data.fill_(0.0)  # type: ignore[operator]
+    mid = m.weight.size(2) // 2
+    gain = nn.init.calculate_gain("relu")
+    assert isinstance(m.weight, TensorType)
+    nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
+
+
+def weight_init_moe_layer(m: ModelType):
+    assert isinstance(m.weight, TensorType)
+    for i in range(m.weight.shape[0]):
+        nn.init.xavier_uniform_(m.weight[i])
+    assert isinstance(m.bias, TensorType)
+    nn.init.zeros_(m.bias)
+
+
+def weight_init(m: ModelType):
+    """Custom weight init for Conv2D and Linear layers."""
+    if isinstance(m, nn.Linear):
+        weight_init_linear(m)
+    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        weight_init_conv(m)
+    elif isinstance(m, MoELinear):
+        weight_init_moe_layer(m)
+
+####################################################################################################
+
+class TaskEncoder(nn.Module):
+    # TODO: improve to account for one-hot!!!
+    def __init__(self, task_dim, net_arch=[100,50], out_dim=50):
+        super().__init__()
+        self.encoder = nn.Sequential(*create_mlp(input_dim=task_dim, output_dim=out_dim, net_arch=net_arch))
+
+    def forward(self, task):
+        return self.encoder(task)
+        
+
+####################################################################################################
 
 class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
     """
@@ -39,6 +97,7 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
         mlp_net_arch: List[int] = [50],
         fuse_method: str = 'concat',
     ) -> None:
+        # TODO: weight inits?
         # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
         super().__init__(observation_space, features_dim=1)
         self.fuse_method = fuse_method
@@ -57,15 +116,15 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
                 total_concat_size += in_dim
                 
             elif encoders[key] == 'mlp':
-                extractors[key] = nn.Sequential(*create_mlp(input_dim=in_dim, output_dim=mlp_out_dim, net_arch=mlp_net_arch)) # TODO: device, check size correct
+                if key == 'desired_goal':
+                    extractors[key] = TaskEncoder(task_dim=in_dim, out_dim=mlp_out_dim)
+                else:
+                    extractors[key] = nn.Sequential(*create_mlp(input_dim=in_dim, output_dim=mlp_out_dim, net_arch=mlp_net_arch)) # TODO: device, check size correct
                 total_concat_size += mlp_out_dim
                 print("no activation on output layer...")
 
-            elif encoders[key] == 'task_enc':
-                # TODO: implement to be similar to SB3...
-                # TODO: add more depth to task embeddings?
-                assert False, "not implemented, concat_size"
-                # extractors[key] = TaskEncoder()
+            else: 
+                assert False
 
         self.extractors = nn.ModuleDict(extractors)
 
@@ -86,6 +145,7 @@ class CustomSimpleCombinedExtractor(BaseFeaturesExtractor):
         else:
             assert False
 
+############################################################################################################
 
 class FiLM(BaseFeaturesExtractor):
     '''
@@ -109,6 +169,7 @@ class FiLM(BaseFeaturesExtractor):
         # hidden_dim: int,
         # should_tie_encoders: bool,
     ):
+        # TODO: weight inits?
         # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
         super().__init__(observation_space, features_dim=1)
     
@@ -117,7 +178,7 @@ class FiLM(BaseFeaturesExtractor):
         # Task encoder
         task_dim = observation_space['desired_goal'].shape[0]
         n_gammas_betas = 2 * (num_layers + 1)
-        self.film_task_encoder = nn.Sequential(*create_mlp(input_dim=task_dim, output_dim=n_gammas_betas, net_arch=task_encoder_arch))
+        self.film_task_encoder = TaskEncoder(task_dim=task_dim, out_dim=n_gammas_betas)
 
         # Obs encoder
         obs_dim = observation_space['observation'].shape[0]
@@ -127,7 +188,7 @@ class FiLM(BaseFeaturesExtractor):
 
         if concat_task_encoding:
             raise NotImplementedError
-        self._features_dim = feature_dim
+        self._features_dim = feature_dim + n_gammas_betas
 
     def forward(self, observations: TensorDict, detach: bool = False) -> th.Tensor:
         env_obs = observations['observation']
@@ -155,8 +216,10 @@ class FiLM(BaseFeaturesExtractor):
         
         assert h.shape[1] == self._features_dim
 
-        return h
-    
+        out_encoding = torch.cat([h, task_encoding], dim=1)
+        # TODO: return more informative task embedding?
+        assert False, "check whether detach embedding..."
+        return out_encoding
 
 
 def _get_list_of_layers(
@@ -215,3 +278,183 @@ def build_mlp_as_module_list(
             sequential_layers.append(nn.Sequential(*new_layer))
     sequential_layers.append(nn.Sequential(*new_layer))
     return nn.ModuleList(sequential_layers)
+
+
+############################################################################################################
+
+class MoELinear(nn.Module):
+    def __init__(
+        self, num_experts: int, in_features: int, out_features: int, bias: bool = True
+    ):
+        """torch.nn.Linear layer extended for use as a mixture of experts.
+
+        Args:
+            num_experts (int): number of experts in the mixture.
+            in_features (int): size of each input sample for one expert.
+            out_features (int): size of each output sample for one expert.
+            bias (bool, optional): if set to ``False``, the layer will
+                not learn an additive bias. Defaults to True.
+        """
+        super().__init__()
+        self.num_experts = num_experts
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(
+            torch.rand(self.num_experts, self.in_features, self.out_features)
+        )
+        if bias:
+            self.bias = nn.Parameter(torch.rand(self.num_experts, 1, self.out_features))
+            self.use_bias = True
+        else:
+            self.use_bias = False
+
+    def forward(self, x: TensorType) -> TensorType:
+        if self.use_bias:
+            return x.matmul(self.weight) + self.bias
+        else:
+            return x.matmul(self.weight)
+
+    def extra_repr(self) -> str:
+        return f"num_experts={self.num_experts}, in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias}"
+
+
+class MoEFeedForward(nn.Module):
+    def __init__(
+        self,
+        num_experts: int,
+        in_features: int,
+        out_features = 50,
+        num_layers = 2,
+        hidden_features = 50,
+        bias: bool = True,
+    ):
+        """A feedforward model of mixture of experts layers.
+
+        Args:
+            num_experts (int): number of experts in the mixture.
+            in_features (int): size of each input sample for one expert.
+            out_features (int): size of each output sample for one expert.
+            num_layers (int): number of layers in the feedforward network.
+            hidden_features (int): dimensionality of hidden layer in the
+                feedforward network.
+            bias (bool, optional): if set to ``False``, the layer will
+                not learn an additive bias. Defaults to True.
+        """
+        super().__init__()
+        layers: List[nn.Module] = []
+        current_in_features = in_features
+        for _ in range(num_layers - 1):
+            linear = MoELinear(
+                num_experts=num_experts,
+                in_features=current_in_features,
+                out_features=hidden_features,
+                bias=bias,
+            )
+            layers.append(linear)
+            layers.append(nn.ReLU())
+            current_in_features = hidden_features
+        linear = MoELinear(
+            num_experts=num_experts,
+            in_features=current_in_features,
+            out_features=out_features,
+            bias=bias,
+        )
+        layers.append(linear)
+        self._model = nn.Sequential(*layers)
+
+    def forward(self, x: TensorType) -> TensorType:
+        return self._model(x)
+
+    def __repr__(self) -> str:
+        return str(self._model)
+
+
+class AttentionBasedExperts(nn.Module):
+    def __init__(
+        self,
+        num_experts,
+        embedding_dim,
+        net_arch=[50,50],
+        temperature=1.0,
+        should_detach_task_encoding=True,
+    ):
+        super().__init__()
+        self.temperature = temperature
+        self.should_detach_task_encoding = should_detach_task_encoding # TODO: check this correct
+        
+        self.trunk = nn.Sequential(*create_mlp(input_dim=embedding_dim, output_dim=num_experts, net_arch=net_arch))
+        self.trunk.apply(weight_init)
+        self._softmax = torch.nn.Softmax(dim=1)
+
+    def forward(self, task_embedding) -> TensorType:
+        emb = task_embedding
+        if self.should_detach_task_encoding:
+            emb = emb.detach()  # type: ignore[union-attr]
+        
+        output = self.trunk(emb)
+        gate = self._softmax(output / self.temperature)
+        if len(gate.shape) > 2:
+            breakpoint()
+        return gate.t().unsqueeze(2)
+
+
+class MixtureofExpertsEncoder(BaseFeaturesExtractor):
+    def __init__(
+        self,
+        observation_space,
+        num_experts: int,
+        task_embedding_dim = 50,
+        moe_out_dim = 50,
+        detach_emb_for_selection = True,
+        # device: torch.device,
+    ):
+        """Mixture of Experts based encoder.
+
+        Args:
+            env_obs_shape (List[int]): shape of the observation that the actor gets.
+            multitask_cfg (ConfigType): config for encoding the multitask knowledge.
+            encoder_cfg (ConfigType): config for the experts in the mixture.
+            task_id_to_encoder_id_cfg (ConfigType): mapping between the tasks and the encoders.
+            num_experts (int): number of experts.
+
+        TODO: task encoding slightly different. If one-hot, should use embeddings and different encoders???
+
+        """
+        # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
+        super().__init__(observation_space, features_dim=1)
+        
+        self.task_encoder = TaskEncoder(task_dim=observation_space['desired_goal'].shape[0], out_dim=task_embedding_dim)
+
+        self.selection_network = AttentionBasedExperts(
+            num_experts=num_experts,
+            embedding_dim=task_embedding_dim,
+            should_detach_task_encoding=detach_emb_for_selection
+        )
+
+        self.moe = MoEFeedForward(
+            num_experts=num_experts,
+            in_features=observation_space['observation'].shape[0],
+            out_features=moe_out_dim,
+        )
+
+        self._features_dim = moe_out_dim + task_embedding_dim
+
+    def forward(self, observations: TensorDict, detach: bool = False):
+        env_obs = observations['observation']
+        task_obs = observations['desired_goal']
+
+        task_embedding = self.task_encoder(task_obs)
+
+        encoder_mask = self.selection_network(task_embedding)
+        encoding = self.moe(env_obs)
+        import pdb; pdb.set_trace()
+        if detach:
+            encoding = encoding.detach()
+        sum_of_masked_encoding = (encoding * encoder_mask).sum(dim=0)
+        sum_of_encoder_count = encoder_mask.sum(dim=0)
+        encoding = sum_of_masked_encoding / sum_of_encoder_count
+        # TODO: according to CARE Fig 3, there is another mlp here
+
+        out_encoding = torch.cat([encoding, task_embedding], dim=1)
+        
+        return out_encoding
