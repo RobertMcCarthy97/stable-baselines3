@@ -16,6 +16,31 @@ ModelType = torch.nn.Module
 TensorType = torch.Tensor
 
 ####################################################################################################
+# inits from: https://github.com/Nirnai/DeepRL/blob/e5d9554e6999a11f3350abfc3fa605ef3ac112d7/models/torch_utils.py#L61
+
+def naive(m):
+    if isinstance(m, nn.Linear):
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+        nn.init.uniform_(m.weight, a=-math.sqrt(1.0 / float(fan_in)), b=math.sqrt(1.0 / float(fan_in)))
+        nn.init.zeros_(m.bias)
+
+def xavier(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight, gain=nn.init.calculate_gain('tanh'))
+        nn.init.zeros_(m.bias)
+
+def kaiming(m):
+    if isinstance(m, nn.Linear):
+        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+        nn.init.zeros_(m.bias)
+
+def orthogonal(m):
+    if isinstance(m, nn.Linear):
+        nn.init.orthogonal_(m.weight, gain=nn.init.calculate_gain('tanh'))
+        nn.init.zeros_(m.bias)
+
+####################################################################################################
+# inits from mtrl
 
 # TODO: use these inits more??
 
@@ -43,7 +68,9 @@ def weight_init_conv(m: ModelType):
 def weight_init_moe_layer(m: ModelType):
     assert isinstance(m.weight, TensorType)
     for i in range(m.weight.shape[0]):
-        nn.init.xavier_uniform_(m.weight[i])
+        # nn.init.xavier_uniform_(m.weight[i]) # TODO: kaiming better for relu?
+        nn.init.kaiming_uniform_(m.weight[i])
+        # nn.init.orthogonal_(m.weight[i], gain=nn.init.calculate_gain("relu"))
     assert isinstance(m.bias, TensorType)
     nn.init.zeros_(m.bias)
 
@@ -153,7 +180,9 @@ class FiLM(BaseFeaturesExtractor):
     - https://github.com/mila-iqia/babyai/blob/65fb0cb6f816532a65014bf034a758244e2d5ae7/babyai/model.py#L20
     - https://github.com/CraftJarvis/MC-Controller/blob/68b5a9d08036301c731157e1d5f6a6f25138dd3e/src/utils/foundation.py#L65
 
-    # TODO: ensure use same params as mtrl.
+    # TODO:
+    - ensure use same params as mtrl.
+    - Return task embedding or only use to modulate encoding?
 
     '''
     def __init__(
@@ -163,8 +192,7 @@ class FiLM(BaseFeaturesExtractor):
         feature_dim: int = 50,
         hidden_dim: int = 50,
         num_layers = 1,
-        concat_task_encoding: bool = False,
-        task_encoder_arch = [50],
+        concat_task_encoding: bool = True,
         # num_layers: int,
         # hidden_dim: int,
         # should_tie_encoders: bool,
@@ -186,13 +214,14 @@ class FiLM(BaseFeaturesExtractor):
         # TODO: should there be a relu on output of this trunk also??
         assert len(self.trunk) == num_layers + 1
 
-        if concat_task_encoding:
-            raise NotImplementedError
-        self._features_dim = feature_dim + n_gammas_betas
+        if self.concat_task_encoding:
+            self._features_dim = feature_dim + n_gammas_betas
+        else:
+            self._features_dim = feature_dim
 
     def forward(self, observations: TensorDict, detach: bool = False) -> th.Tensor:
+        
         env_obs = observations['observation']
-
         task_encoding = self.film_task_encoder(observations['desired_goal'])
         # TODO: detach task_encoding??
 
@@ -205,21 +234,18 @@ class FiLM(BaseFeaturesExtractor):
         h = env_obs
         for layer, gamma_beta in zip(self.trunk, gammas_and_betas):
             h = layer(h) * gamma_beta[:, 0] + gamma_beta[:, 1]
-        
+
         if detach:
             h = h.detach() # TODO: check in mtrl where should detach, implement as same...
+            assert False
         
         if self.concat_task_encoding:
             h = torch.cat([h, task_encoding], dim=1)
-            assert False, "check concat correct"
             # TODO: check whether to also return task_encoding...
-        
-        assert h.shape[1] == self._features_dim
 
-        out_encoding = torch.cat([h, task_encoding], dim=1)
-        # TODO: return more informative task embedding?
-        assert False, "check whether detach embedding..."
-        return out_encoding
+        assert h.shape[1] == self._features_dim
+        
+        return h
 
 
 def _get_list_of_layers(
@@ -370,6 +396,8 @@ class MoEFeedForward(nn.Module):
 
 
 class AttentionBasedExperts(nn.Module):
+    # TODO: this net works differently to how described in paper??
+    # - In paper does a cosine similarity between task encoding and state embedding...
     def __init__(
         self,
         num_experts,
@@ -383,7 +411,6 @@ class AttentionBasedExperts(nn.Module):
         self.should_detach_task_encoding = should_detach_task_encoding # TODO: check this correct
         
         self.trunk = nn.Sequential(*create_mlp(input_dim=embedding_dim, output_dim=num_experts, net_arch=net_arch))
-        self.trunk.apply(weight_init)
         self._softmax = torch.nn.Softmax(dim=1)
 
     def forward(self, task_embedding) -> TensorType:
@@ -437,6 +464,9 @@ class MixtureofExpertsEncoder(BaseFeaturesExtractor):
             out_features=moe_out_dim,
         )
 
+        self.selection_network.apply(weight_init)
+        self.moe.apply(weight_init)
+
         self._features_dim = moe_out_dim + task_embedding_dim
 
     def forward(self, observations: TensorDict, detach: bool = False):
@@ -447,9 +477,9 @@ class MixtureofExpertsEncoder(BaseFeaturesExtractor):
 
         encoder_mask = self.selection_network(task_embedding)
         encoding = self.moe(env_obs)
-        import pdb; pdb.set_trace()
         if detach:
             encoding = encoding.detach()
+            assert False
         sum_of_masked_encoding = (encoding * encoder_mask).sum(dim=0)
         sum_of_encoder_count = encoder_mask.sum(dim=0)
         encoding = sum_of_masked_encoding / sum_of_encoder_count
@@ -458,3 +488,40 @@ class MixtureofExpertsEncoder(BaseFeaturesExtractor):
         out_encoding = torch.cat([encoding, task_embedding], dim=1)
         
         return out_encoding
+    
+class CAREDummy(BaseFeaturesExtractor):
+    def __init__(
+        self,
+        observation_space,
+        num_experts: int,
+        moe_out_dim = 50,
+        # device: torch.device,
+    ):
+        """Mixture of Experts based encoder.
+
+        Args:
+            env_obs_shape (List[int]): shape of the observation that the actor gets.
+            multitask_cfg (ConfigType): config for encoding the multitask knowledge.
+            encoder_cfg (ConfigType): config for the experts in the mixture.
+            task_id_to_encoder_id_cfg (ConfigType): mapping between the tasks and the encoders.
+            num_experts (int): number of experts.
+
+        TODO: task encoding slightly different. If one-hot, should use embeddings and different encoders???
+
+        """
+        # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
+        super().__init__(observation_space, features_dim=1)
+        
+        assert num_experts == 1
+        self.moe = MoEFeedForward(
+            num_experts=num_experts,
+            in_features=observation_space['observation'].shape[0],
+            out_features=moe_out_dim,
+        )
+        self.moe.apply(weight_init)
+        self._features_dim = moe_out_dim
+
+    def forward(self, observations: TensorDict, detach: bool = False):
+        env_obs = observations['observation']
+        encoding = self.moe(env_obs).sum(dim=0) # summed over wrong dimension???
+        return encoding
