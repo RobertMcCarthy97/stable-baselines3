@@ -41,6 +41,7 @@ class Actor(BasePolicy):
         features_dim: int,
         activation_fn: Type[nn.Module] = nn.ReLU,
         normalize_images: bool = True,
+        detach_features_extractor: bool = False,
     ):
         super().__init__(
             observation_space,
@@ -53,6 +54,7 @@ class Actor(BasePolicy):
         self.net_arch = net_arch
         self.features_dim = features_dim
         self.activation_fn = activation_fn
+        self.detach_features_extractor = detach_features_extractor
 
         action_dim = get_action_dim(self.action_space)
         actor_net = create_mlp(features_dim, action_dim, net_arch, activation_fn, squash_output=True)
@@ -75,6 +77,9 @@ class Actor(BasePolicy):
     def forward(self, obs: th.Tensor) -> th.Tensor:
         # assert deterministic, 'The TD3 actor only outputs deterministic actions'
         features = self.extract_features(obs, self.features_extractor)
+        if self.detach_features_extractor:
+            features = features.detach()
+            assert False, "SB3 uses policy to update shared feature extractor by default"
         return self.mu(features)
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
@@ -340,6 +345,8 @@ class MultiInputPolicy(TD3Policy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
+        # custom
+        goal_based_custom_args: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(
             observation_space,
@@ -354,4 +361,6 @@ class MultiInputPolicy(TD3Policy):
             optimizer_kwargs,
             n_critics,
             share_features_extractor,
+            # custom
+            goal_based_custom_args=goal_based_custom_args,
         )

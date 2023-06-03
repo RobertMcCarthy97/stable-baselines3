@@ -204,9 +204,10 @@ class LLMBasicReplayBuffer(ReplayBuffer):
         
         ###### Parent goal relabelling (custom) # TODO: move into own function?
         if self.do_parent_relabel:
+            # get parent batch
             obs_parent_goals_ = self.obs_parent_goals[batch_inds, env_indices].copy()
             parent_rewards_ = self.parent_goal_rewards[batch_inds, env_indices].copy()
-            # Relabel (only if the parent goal is not none)
+            ## Relabel (only if the parent goal is not none)
             # choose idxs
             valid_idxs = np.where(~np.isnan(obs_parent_goals_[:, 0]))[0]
             prob_indices = np.where(np.random.rand(len(valid_idxs)) <= self.parent_relabel_p)[0]
