@@ -43,6 +43,11 @@ class LLMBasicReplayBuffer(ReplayBuffer):
     :param handle_timeout_termination: Handle timeout termination (due to timelimit)
         separately and treat the task as infinite horizon task.
         https://github.com/DLR-RM/stable-baselines3/issues/284
+
+    Custom info:
+    - This is only for single policy (learning multiple tasks) training
+    # TODO: rename to SinglePolicyMultiTaskBuffer
+
     """
 
     def __init__(
