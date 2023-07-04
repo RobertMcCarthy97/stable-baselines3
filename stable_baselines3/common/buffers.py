@@ -635,6 +635,10 @@ class DictReplayBuffer(ReplayBuffer):
         # Convert to torch tensor
         observations = {key: self.to_torch(obs) for key, obs in obs_.items()}
         next_observations = {key: self.to_torch(obs) for key, obs in next_obs_.items()}
+        
+        assert self.to_torch(self.dones[batch_inds, env_indices] * (1 - self.timeouts[batch_inds, env_indices])).reshape(
+                -1, 1
+            ).sum() == 0
 
         return DictReplayBufferSamples(
             observations=observations,
