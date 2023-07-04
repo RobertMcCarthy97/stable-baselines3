@@ -102,7 +102,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         use_sde_at_warmup: bool = False,
         sde_support: bool = True,
         supported_action_spaces: Optional[Tuple[spaces.Space, ...]] = None,
-        use_oracle_at_warmup: bool = False,
+        oracle_at_warmup: Dict[str, Any] = {'use_oracle': False, 'oracle_steps': 0},
     ):
         super().__init__(
             policy=policy,
@@ -141,7 +141,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
             self.policy_kwargs["use_sde"] = self.use_sde
         # For gSDE only
         self.use_sde_at_warmup = use_sde_at_warmup
-        self.use_oracle_at_warmup = use_oracle_at_warmup
+        self.oracle_at_warmup = oracle_at_warmup
 
     def _convert_train_freq(self) -> None:
         """
@@ -376,7 +376,7 @@ class OffPolicyAlgorithm(BaseAlgorithm):
         """
         # Select action randomly or according to policy
         if self.num_timesteps < learning_starts and not (self.use_sde and self.use_sde_at_warmup):
-            if self.use_oracle_at_warmup:
+            if self.oracle_at_warmup['use_oracle'] and self.oracle_at_warmup['oracle_steps'] > self.num_timesteps:
                 unscaled_action = self.predict_oracle(self._last_original_obs)
             else:
                 # Warmup phase
